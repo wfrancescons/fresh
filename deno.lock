@@ -3268,6 +3268,13 @@
           "npm:vite-plugin-inspect@^11.3.2",
           "npm:vite@^7.1.2"
         ]
+      },
+      "www": {
+        "dependencies": [
+          "npm:@tailwindcss/vite@^4.1.12",
+          "npm:vite-plugin-inspect@^11.3.2",
+          "npm:vite@^7.1.2"
+        ]
       }
     }
   }
