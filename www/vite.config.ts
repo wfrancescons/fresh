@@ -43,7 +43,6 @@ function copyDocs(): Plugin {
           // Ignore
         }
 
-        // await new Promise((r) => setTimeout(r, 2220000));
         await copy(source, target);
       }
     },
