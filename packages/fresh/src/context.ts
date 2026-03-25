@@ -7,27 +7,35 @@ import {
   isValidElement,
   type VNode,
 } from "preact";
+import { jsxTemplate } from "preact/jsx-runtime";
 import { SpanStatusCode } from "@opentelemetry/api";
 import type { ResolvedFreshConfig } from "./config.ts";
 import type { BuildCache } from "./build_cache.ts";
 import type { LayoutConfig } from "./types.ts";
-import { RenderState, setRenderState } from "./runtime/server/preact_hooks.tsx";
-import { PARTIAL_SEARCH_PARAM } from "./constants.ts";
+import {
+  FreshScripts,
+  RenderState,
+  setRenderState,
+} from "./runtime/server/preact_hooks.ts";
+import { DEV_ERROR_OVERLAY_URL, PARTIAL_SEARCH_PARAM } from "./constants.ts";
 import { tracer } from "./otel.ts";
 import {
   type ComponentDef,
   isAsyncAnyComponent,
   type PageProps,
-  preactRender,
   renderAsyncAnyComponent,
   renderRouteComponent,
 } from "./render.ts";
+import { renderToString } from "preact-render-to-string";
+
+const ENCODER = new TextEncoder();
 
 export interface Island {
   file: string;
   name: string;
   exportName: string;
   fn: ComponentType;
+  css: string[];
 }
 
 export type ServerIslandRegistry = Map<ComponentType, Island>;
@@ -46,6 +54,7 @@ export type FreshContext<State = unknown> = Context<State>;
 
 export let getBuildCache: <T>(ctx: Context<T>) => BuildCache<T>;
 export let getInternals: <T>(ctx: Context<T>) => UiTree<unknown, T>;
+export let setAdditionalStyles: <T>(ctx: Context<T>, css: string[]) => void;
 
 /**
  * The context passed to every middleware. It is unique for every request.
@@ -74,7 +83,7 @@ export class Context<State> {
   data: unknown = undefined;
   /** Error value if an error was caught (Default: null) */
   error: unknown | null = null;
-  readonly info: Deno.ServeHandlerInfo | Deno.ServeHandlerInfo;
+  readonly info: Deno.ServeHandlerInfo;
   /**
    * Whether the current Request is a partial request.
    *
@@ -110,6 +119,7 @@ export class Context<State> {
   next: () => Promise<Response>;
 
   #buildCache: BuildCache<State>;
+  #additionalStyles: string[] | null = null;
 
   Component!: FunctionComponent;
 
@@ -117,6 +127,8 @@ export class Context<State> {
     // deno-lint-ignore no-explicit-any
     getInternals = <T>(ctx: Context<T>) => ctx.#internal as any;
     getBuildCache = <T>(ctx: Context<T>) => ctx.#buildCache;
+    setAdditionalStyles = <T>(ctx: Context<T>, css: string[]) =>
+      ctx.#additionalStyles = css;
   }
 
   constructor(
@@ -215,19 +227,23 @@ export class Context<State> {
       vnode = result;
     }
 
+    let appChild = vnode;
+    // deno-lint-ignore no-explicit-any
+    let appVNode: VNode<any>;
+
+    let hasApp = true;
+
     if (isAsyncAnyComponent(appDef)) {
-      const child = vnode;
-      props.Component = () => child;
+      props.Component = () => appChild;
       const result = await renderAsyncAnyComponent(appDef, props);
       if (result instanceof Response) {
         return result;
       }
 
-      vnode = result;
+      appVNode = result;
     } else if (appDef !== null) {
-      const child = vnode;
-      vnode = h(appDef, {
-        Component: () => child,
+      appVNode = h(appDef, {
+        Component: () => appChild,
         config: this.config,
         data: null,
         error: this.error,
@@ -237,14 +253,14 @@ export class Context<State> {
         req: this.req,
         state: this.state,
         url: this.url,
+        route: this.route,
       });
+    } else {
+      hasApp = false;
+      appVNode = appChild ?? h(Fragment, null);
     }
 
-    const headers = init.headers !== undefined
-      ? init.headers instanceof Headers
-        ? init.headers
-        : new Headers(init.headers)
-      : new Headers();
+    const headers = getHeadersFromInit(init);
 
     headers.set("Content-Type", "text/html; charset=utf-8");
     const responseInit: ResponseInit = {
@@ -267,15 +283,57 @@ export class Context<State> {
         partialId,
       );
 
+      if (this.#additionalStyles !== null) {
+        for (let i = 0; i < this.#additionalStyles.length; i++) {
+          const css = this.#additionalStyles[i];
+          state.islandAssets.add(css);
+        }
+      }
+
       try {
         setRenderState(state);
 
-        return preactRender(
+        let html = renderToString(
           vnode ?? h(Fragment, null),
-          this,
-          state,
-          headers,
         );
+
+        if (hasApp) {
+          appChild = jsxTemplate([html]);
+          html = renderToString(appVNode);
+        }
+
+        if (
+          !state.renderedHtmlBody || !state.renderedHtmlHead ||
+          !state.renderedHtmlTag
+        ) {
+          let fallback: VNode = jsxTemplate([html]);
+          if (!state.renderedHtmlBody) {
+            let scripts: VNode | null = null;
+
+            if (
+              this.url.pathname !== this.config.basePath + DEV_ERROR_OVERLAY_URL
+            ) {
+              scripts = h(FreshScripts, null) as VNode;
+            }
+
+            fallback = h("body", null, fallback, scripts);
+          }
+          if (!state.renderedHtmlHead) {
+            fallback = h(
+              Fragment,
+              null,
+              h("head", null, h("meta", { charset: "utf-8" })),
+              fallback,
+            );
+          }
+          if (!state.renderedHtmlTag) {
+            fallback = h("html", null, fallback);
+          }
+
+          html = renderToString(fallback);
+        }
+
+        return `<!DOCTYPE html>${html}`;
       } catch (err) {
         if (err instanceof Error) {
           span.recordException(err);
@@ -287,6 +345,27 @@ export class Context<State> {
         }
         throw err;
       } finally {
+        // Add preload headers
+        const basePath = this.config.basePath;
+        const runtimeUrl = state.buildCache.clientEntry.startsWith(".")
+          ? state.buildCache.clientEntry.slice(1)
+          : state.buildCache.clientEntry;
+        let link = `<${
+          encodeURI(`${basePath}${runtimeUrl}`)
+        }>; rel="modulepreload"; as="script"`;
+        state.islands.forEach((island) => {
+          const specifier = `${basePath}${
+            island.file.startsWith(".") ? island.file.slice(1) : island.file
+          }`;
+          link += `, <${
+            encodeURI(specifier)
+          }>; rel="modulepreload"; as="script"`;
+        });
+
+        if (link !== "") {
+          headers.append("Link", link);
+        }
+
         state.clear();
         setRenderState(null);
 
@@ -295,4 +374,102 @@ export class Context<State> {
     });
     return new Response(html, responseInit);
   }
+
+  /**
+   * Respond with text. Sets `Content-Type: text/plain`.
+   * ```tsx
+   * app.use(ctx => ctx.text("Hello World!"));
+   * ```
+   */
+  text(content: string, init?: ResponseInit): Response {
+    return new Response(content, init);
+  }
+
+  /**
+   * Respond with html string. Sets `Content-Type: text/html`.
+   * ```tsx
+   * app.get("/", ctx => ctx.html("<h1>foo</h1>"));
+   * ```
+   */
+  html(content: string, init?: ResponseInit): Response {
+    const headers = getHeadersFromInit(init);
+    headers.set("Content-Type", "text/html; charset=utf-8");
+
+    return new Response(content, { ...init, headers });
+  }
+
+  /**
+   * Respond with json string, same as `Response.json()`. Sets
+   * `Content-Type: application/json`.
+   * ```tsx
+   * app.get("/", ctx => ctx.json({ foo: 123 }));
+   * ```
+   */
+  // deno-lint-ignore no-explicit-any
+  json(content: any, init?: ResponseInit): Response {
+    return Response.json(content, init);
+  }
+
+  /**
+   * Helper to stream a sync or async iterable and encode text
+   * automatically.
+   *
+   * ```tsx
+   * function* gen() {
+   *   yield "foo";
+   *   yield "bar";
+   * }
+   *
+   * app.use(ctx => ctx.stream(gen()))
+   * ```
+   *
+   * Or pass in the function directly:
+   *
+   * ```tsx
+   * app.use(ctx => {
+   *   return ctx.stream(function* gen() {
+   *     yield "foo";
+   *     yield "bar";
+   *   });
+   * );
+   * ```
+   */
+  stream<U extends string | Uint8Array>(
+    stream:
+      | Iterable<U>
+      | AsyncIterable<U>
+      | (() => Iterable<U> | AsyncIterable<U>),
+    init?: ResponseInit,
+  ): Response {
+    const raw = typeof stream === "function" ? stream() : stream;
+
+    const body = ReadableStream.from(raw)
+      .pipeThrough(
+        new TransformStream({
+          transform(chunk, controller) {
+            if (chunk instanceof Uint8Array) {
+              // deno-lint-ignore no-explicit-any
+              controller.enqueue(chunk as any);
+            } else if (chunk === undefined) {
+              controller.enqueue(undefined);
+            } else {
+              const raw = ENCODER.encode(String(chunk));
+              controller.enqueue(raw);
+            }
+          },
+        }),
+      );
+
+    return new Response(body, init);
+  }
+}
+
+function getHeadersFromInit(init?: ResponseInit) {
+  if (init === undefined) {
+    return new Headers();
+  }
+
+  return init.headers !== undefined
+    ? init.headers instanceof Headers ? init.headers : new Headers(init.headers)
+    : new Headers();
 }

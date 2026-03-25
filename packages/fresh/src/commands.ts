@@ -1,3 +1,4 @@
+import { setAdditionalStyles } from "./context.ts";
 import { HttpError } from "./error.ts";
 import { isHandlerByMethod, type PageResponse } from "./handlers.ts";
 import type { MaybeLazyMiddleware, Middleware } from "./middlewares/mod.ts";
@@ -282,6 +283,10 @@ function applyCommandsInner<State>(
               def = await route();
             }
 
+            if (def.css !== undefined) {
+              setAdditionalStyles(ctx, def.css);
+            }
+
             return renderRoute(ctx, def);
           });
 
@@ -352,7 +357,8 @@ function applyCommandsInner<State>(
       }
       case CommandType.FsRoute: {
         const items = cmd.getItems();
-        applyCommandsInner(root, router, items, basePath);
+        const base = mergePath(basePath, cmd.pattern, true);
+        applyCommandsInner(root, router, items, base);
         break;
       }
       default:

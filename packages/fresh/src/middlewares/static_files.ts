@@ -68,16 +68,20 @@ export function staticFiles<T>(): Middleware<T> {
         vary: "If-None-Match",
       });
 
-      const ifNoneMatch = req.headers.get("If-None-Match");
-      if (
-        ifNoneMatch !== null &&
-        (ifNoneMatch === etag || ifNoneMatch === `W/"${etag}"`)
-      ) {
-        file.close();
-        span.setAttribute("fresh.cache", "not_modified");
-        return new Response(null, { status: 304, headers });
-      } else if (etag !== null) {
-        headers.set("Etag", `W/"${etag}"`);
+      // In development mode, skip ETag validation to prevent serving stale
+      // cached assets when switching between different apps on the same port
+      if (ctx.config.mode !== "development") {
+        const ifNoneMatch = req.headers.get("If-None-Match");
+        if (
+          ifNoneMatch !== null &&
+          (ifNoneMatch === etag || ifNoneMatch === `W/"${etag}"`)
+        ) {
+          file.close();
+          span.setAttribute("fresh.cache", "not_modified");
+          return new Response(null, { status: 304, headers });
+        } else if (etag !== null) {
+          headers.set("Etag", `W/"${etag}"`);
+        }
       }
 
       if (
@@ -103,7 +107,9 @@ export function staticFiles<T>(): Middleware<T> {
         return new Response(null, { status: 200, headers });
       }
 
-      return new Response(file.readable, { headers });
+      // Errors in TS 5.9.2, not sure why
+      // deno-lint-ignore no-explicit-any
+      return new Response(file.readable as any, { headers });
     } finally {
       span.end();
     }

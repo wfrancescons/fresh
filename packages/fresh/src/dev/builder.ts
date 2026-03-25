@@ -25,7 +25,7 @@ import { parseDirPath } from "../config.ts";
 import { pathToExportName, UniqueNamer } from "../utils.ts";
 import { checkDenoCompilerOptions } from "./check.ts";
 import { crawlFsItem } from "./fs_crawl.ts";
-import { DAY } from "../constants.ts";
+import { TEST_FILE_PATTERN, UPDATE_INTERVAL } from "../constants.ts";
 
 export interface BuildOptions {
   /**
@@ -104,8 +104,6 @@ export type ResolvedBuildConfig = Required<Omit<BuildOptions, "sourceMap">> & {
   sourceMap?: FreshBundleOptions["sourceMap"];
 };
 
-const TEST_FILE_PATTERN = /[._]test\.(?:[tj]sx?|[mc][tj]s)$/;
-
 // deno-lint-ignore no-explicit-any
 export class Builder<State = any> {
   #transformer: FileTransformer;
@@ -158,7 +156,7 @@ export class Builder<State = any> {
     options: ListenOptions = {},
   ): Promise<void> {
     // Run update check in background
-    updateCheck(DAY).catch(() => {});
+    updateCheck(UPDATE_INTERVAL).catch(() => {});
 
     this.config.mode = "development";
 
@@ -215,7 +213,7 @@ export class Builder<State = any> {
    * This can also be used for testing to apply a snapshot to a particular
    * {@linkcode App} instance.
    *
-   * @example
+   * @example Testing
    * ```ts
    * const builder = new Builder();
    * const applySnapshot = await builder.build({ snapshot: "memory" });
@@ -297,7 +295,7 @@ export class Builder<State = any> {
 
     const runtimePath = dev
       ? "../runtime/client/dev.ts"
-      : "../runtime/client/mod.tsx";
+      : "../runtime/client/mod.ts";
 
     const entryPoints: Record<string, string> = {
       "fresh-runtime": new URL(runtimePath, import.meta.url).href,
@@ -314,6 +312,7 @@ export class Builder<State = any> {
         name,
         server: spec,
         browser: null,
+        css: [],
       });
     }
 

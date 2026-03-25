@@ -6,7 +6,7 @@ import {
   matchesUrl,
   PartialMode,
   UrlMatchKind,
-} from "../shared_internal.tsx";
+} from "../shared_internal.ts";
 import {
   ACTIVE_PARTIALS,
   copyOldChildren,
@@ -19,7 +19,7 @@ import {
   PartialComp,
 } from "./reviver.ts";
 import { createRootFragment, isCommentNode, isElementNode } from "./reviver.ts";
-import type { PartialStateJson } from "../server/preact_hooks.tsx";
+import type { PartialStateJson } from "../server/preact_hooks.ts";
 import { parse } from "../../jsonify/parse.ts";
 import { INTERNAL_PREFIX, PARTIAL_SEARCH_PARAM } from "../../constants.ts";
 
@@ -132,7 +132,7 @@ document.addEventListener("click", async (e) => {
           partial ? partial : nextUrl.href,
           location.href,
         );
-        await fetchPartials(nextUrl, partialUrl);
+        await fetchPartials(nextUrl, partialUrl, true);
         updateLinks(nextUrl);
         scrollTo({ left: 0, top: 0, behavior: "instant" });
       } finally {
@@ -155,7 +155,7 @@ document.addEventListener("click", async (e) => {
         partial,
         location.href,
       );
-      await fetchPartials(partialUrl, partialUrl);
+      await fetchPartials(partialUrl, partialUrl, false);
     }
   }
 });
@@ -192,7 +192,7 @@ addEventListener("popstate", async (e) => {
 
   const url = new URL(location.href, location.origin);
   try {
-    await fetchPartials(url, url);
+    await fetchPartials(url, url, true);
     updateLinks(url);
     scrollTo({
       left: state.scrollX ?? 0,
@@ -254,7 +254,7 @@ document.addEventListener("submit", async (e) => {
         init = { body: new FormData(el, e.submitter), method: lowerMethod };
       }
 
-      await fetchPartials(actionUrl, partialUrl, init);
+      await fetchPartials(actionUrl, partialUrl, true, init);
     }
   }
 });
@@ -282,6 +282,7 @@ function updateLinks(url: URL) {
 async function fetchPartials(
   actualUrl: URL,
   partialUrl: URL,
+  shouldNavigate: boolean,
   init: RequestInit = {},
 ) {
   init.redirect = "follow";
@@ -296,7 +297,10 @@ async function fetchPartials(
     }
   }
 
-  maybeUpdateHistory(actualUrl);
+  if (shouldNavigate) {
+    maybeUpdateHistory(actualUrl);
+  }
+
   await applyPartials(res);
 }
 

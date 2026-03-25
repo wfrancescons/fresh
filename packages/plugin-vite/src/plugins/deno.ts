@@ -1,14 +1,21 @@
 import type { Plugin } from "vite";
 import {
   type Loader,
+  MediaType,
   RequestedModuleType,
   ResolutionMode,
   Workspace,
 } from "@deno/loader";
 import * as path from "@std/path";
 import * as babel from "@babel/core";
-import babelReact from "@babel/preset-react";
 import { httpAbsolute } from "./patches/http_absolute.ts";
+import { JS_REG, JSX_REG } from "../utils.ts";
+import { builtinModules } from "node:module";
+
+// @ts-ignore Workaround for https://github.com/denoland/deno/issues/30850
+const { default: babelReact } = await import("@babel/preset-react");
+
+const BUILTINS = new Set(builtinModules);
 
 interface DenoState {
   type: RequestedModuleType;
@@ -22,6 +29,7 @@ export function deno(): Plugin {
 
   return {
     name: "deno",
+    sharedDuringBuild: true,
     // We must be first to be able to resolve before the
     // Vite's own`vite:resolve` plugin. It always treats bare
     // specifiers as external during SSR.
@@ -31,10 +39,14 @@ export function deno(): Plugin {
     },
     async configResolved() {
       // TODO: Pass conditions
-      ssrLoader = await new Workspace({}).createLoader();
+      ssrLoader = await new Workspace({
+        platform: "node",
+        cachedOnly: true,
+      }).createLoader();
       browserLoader = await new Workspace({
         platform: "browser",
         preserveJsx: true,
+        cachedOnly: true,
       })
         .createLoader();
     },
@@ -42,7 +54,19 @@ export function deno(): Plugin {
       return true;
     },
     async resolveId(id, importer, options) {
-      const loader = options?.ssr ? ssrLoader : browserLoader;
+      if (BUILTINS.has(id)) {
+        // `node:` prefix is not included in builtins list.
+        if (!id.startsWith("node:")) {
+          id = `node:${id}`;
+        }
+        return {
+          id,
+          external: true,
+        };
+      }
+      const loader = this.environment.config.consumer === "server"
+        ? ssrLoader
+        : browserLoader;
 
       const original = id;
 
@@ -97,6 +121,13 @@ export function deno(): Plugin {
           ResolutionMode.Import,
         );
 
+        if (resolved.startsWith("node:")) {
+          return {
+            id: resolved,
+            external: true,
+          };
+        }
+
         if (original === resolved) {
           return null;
         }
@@ -125,8 +156,10 @@ export function deno(): Plugin {
         // ignore
       }
     },
-    async load(id, options) {
-      const loader = options?.ssr ? ssrLoader : browserLoader;
+    async load(id) {
+      const loader = this.environment.config.consumer === "server"
+        ? ssrLoader
+        : browserLoader;
 
       if (isDenoSpecifier(id)) {
         const { type, specifier } = parseDenoSpecifier(id);
@@ -139,7 +172,8 @@ export function deno(): Plugin {
         const code = new TextDecoder().decode(result.code);
 
         const maybeJsx = babelTransform({
-          ssr: !!options?.ssr,
+          ssr: this.environment.config.consumer === "server",
+          media: result.mediaType,
           code,
           id: specifier,
           isDev,
@@ -167,7 +201,7 @@ export function deno(): Plugin {
       // Skip for non-js files like `.css`
       if (
         meta.type === RequestedModuleType.Default &&
-        !/\.([tj]sx?|[mc]?[tj]s)$/.test(id)
+        !JS_REG.test(id)
       ) {
         return;
       }
@@ -182,7 +216,8 @@ export function deno(): Plugin {
       const code = new TextDecoder().decode(result.code);
 
       const maybeJsx = babelTransform({
-        ssr: !!options?.ssr,
+        ssr: this.environment.config.consumer === "server",
+        media: result.mediaType,
         id,
         code,
         isDev,
@@ -195,42 +230,78 @@ export function deno(): Plugin {
         code,
       };
     },
-    async transform(_, id, options) {
-      // This transform is a hack to be able to re-use Deno's precompile
-      // jsx transform.
-      if (!options?.ssr || !id.endsWith(".tsx") || id.endsWith(".jsx")) {
-        return;
-      }
+    transform: {
+      filter: {
+        id: JSX_REG,
+      },
+      async handler(_, id) {
+        // This transform is a hack to be able to re-use Deno's precompile
+        // jsx transform.
+        if (this.environment.name === "client") {
+          return;
+        }
 
-      let actualId = id;
-      if (isDenoSpecifier(id)) {
-        const { specifier } = parseDenoSpecifier(id);
-        actualId = specifier;
-      }
-      if (path.isAbsolute(actualId)) {
-        actualId = path.toFileUrl(actualId).href;
-      }
+        let actualId = id;
+        if (isDenoSpecifier(id)) {
+          const { specifier } = parseDenoSpecifier(id);
+          actualId = specifier;
+        }
+        actualId = actualId.replace("?commonjs-es-import", "");
 
-      const resolved = await ssrLoader.resolve(
-        actualId,
-        undefined,
-        ResolutionMode.Import,
-      );
-      const result = await ssrLoader.load(
-        resolved,
-        RequestedModuleType.Default,
-      );
-      if (result.kind === "external") {
-        return;
-      }
+        if (actualId.startsWith("\0")) {
+          actualId = actualId.slice(1);
+        }
+        if (path.isAbsolute(actualId)) {
+          actualId = path.toFileUrl(actualId).href;
+        }
 
-      const code = new TextDecoder().decode(result.code);
+        const resolved = await ssrLoader.resolve(
+          actualId,
+          undefined,
+          ResolutionMode.Import,
+        );
+        const result = await ssrLoader.load(
+          resolved,
+          RequestedModuleType.Default,
+        );
+        if (result.kind === "external") {
+          return;
+        }
 
-      return {
-        code,
-      };
+        const code = new TextDecoder().decode(result.code);
+
+        return {
+          code,
+        };
+      },
     },
   };
+}
+
+function isJsMediaType(media: MediaType): boolean {
+  switch (media) {
+    case MediaType.JavaScript:
+    case MediaType.Jsx:
+    case MediaType.Mjs:
+    case MediaType.Cjs:
+    case MediaType.TypeScript:
+    case MediaType.Mts:
+    case MediaType.Cts:
+    case MediaType.Tsx:
+      return true;
+
+    case MediaType.Dts:
+    case MediaType.Dmts:
+    case MediaType.Dcts:
+    case MediaType.Css:
+    case MediaType.Json:
+    case MediaType.Html:
+    case MediaType.Sql:
+    case MediaType.Wasm:
+    case MediaType.SourceMap:
+    case MediaType.Unknown:
+      return false;
+  }
 }
 
 export type DenoSpecifier = string & { __deno: string };
@@ -286,12 +357,15 @@ function getDenoType(id: string, type: string): RequestedModuleType {
 }
 
 function babelTransform(
-  options: { ssr: boolean; code: string; id: string; isDev: boolean },
+  options: {
+    media: MediaType;
+    ssr: boolean;
+    code: string;
+    id: string;
+    isDev: boolean;
+  },
 ) {
-  if (
-    !/\.([tj]sx?|[mc[jt]s)$/.test(options.id) &&
-    !/^https?:\/\//.test(options.id)
-  ) {
+  if (!isJsMediaType(options.media)) {
     return null;
   }
 
@@ -305,6 +379,7 @@ function babelTransform(
       runtime: "automatic",
       importSource: "preact",
       development: isDev,
+      throwIfNamespace: false,
     }]);
   }
 
@@ -313,9 +388,10 @@ function babelTransform(
   const result = babel.transformSync(code, {
     filename: id,
     babelrc: false,
-    sourceMaps: "inline",
+    sourceMaps: "both",
     presets: presets,
     plugins: [httpAbsolute(url)],
+    compact: false,
   });
 
   if (result !== null && result.code) {
