@@ -467,5 +467,11 @@
     "link": "https://deno-sandbox-api-test.octo8080x.deno.net/",
     "github": "https://github.com/Octo8080X/deno-sandbox-api-test",
     "image": "deno-sandbox-api-test-game"
+  },
+  {
+    "title": "VailNote",
+    "link": "https://vailnote.com/",
+    "github": "emilkrebs/vailnote",
+    "image": "vailnote"
   }
 ]
